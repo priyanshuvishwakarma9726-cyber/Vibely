@@ -9,7 +9,6 @@ export default function SettingsModal({ onClose }) {
     const { darkMode, toggleDarkMode } = useTheme()
     const [loading, setLoading] = useState(false)
     const [username, setUsername] = useState(user.user_metadata?.username || '')
-    const [discriminator, setDiscriminator] = useState('')
     const [fullName, setFullName] = useState(user.user_metadata?.full_name || '')
     const [about, setAbout] = useState('')
     const [avatarUrl, setAvatarUrl] = useState('')
@@ -25,24 +24,41 @@ export default function SettingsModal({ onClose }) {
                 setFullName(data.full_name || '')
                 setAbout(data.about || '')
                 setAvatarUrl(data.avatar_url || '')
-                setDiscriminator(data.discriminator || '0000')
             }
         }
         fetchProfile()
     }, [user.id])
 
-    const fullUniqueId = `${username}#${discriminator}`
+
 
     const handleSave = async () => {
         setLoading(true)
         try {
+            // Ensure username exists for new profiles
+            let finalUsername = username;
+
+            if (!finalUsername || finalUsername.length < 3) {
+                // Fallback to email prefix or user metadata
+                finalUsername = user.user_metadata?.username || user.email?.split('@')[0] || 'user';
+                // Ensure at least 3 chars
+                if (finalUsername.length < 3) {
+                    finalUsername = `${finalUsername}${Math.floor(Math.random() * 1000)}`;
+                }
+            }
+
             // Update profile in DB
-            const { error } = await supabase.from('profiles').update({
-                // username, // Don't update username as it's not editable here and might overwrite with empty
+            const updates = {
+                id: user.id,
                 full_name: fullName,
-                about,
-                avatar_url: avatarUrl
-            }).eq('id', user.id)
+                about: about,
+                avatar_url: avatarUrl,
+                username: finalUsername,
+            }
+
+            // Remove undefined values
+            Object.keys(updates).forEach(key => updates[key] === undefined && delete updates[key])
+
+            const { error } = await supabase.from('profiles').upsert(updates)
 
             if (error) throw error
 
@@ -58,8 +74,8 @@ export default function SettingsModal({ onClose }) {
 
             onClose()
         } catch (err) {
-            console.error(err)
-            alert("Failed to update settings")
+            console.error('Error saving profile:', err)
+            alert(`Failed to update settings: ${err.message}`)
         } finally {
             setLoading(false)
         }
@@ -135,27 +151,18 @@ export default function SettingsModal({ onClose }) {
                             />
                         </div>
                         <div>
-                            <label className="block text-sm font-medium text-gray-700 dark:text-whatsapp-light mb-1">Unique ID</label>
-                            <div className="flex gap-2">
+                            <label className="block text-sm font-medium text-gray-700 dark:text-whatsapp-light mb-1">Username</label>
+                            <div className="flex gap-2 relative">
+                                <span className="absolute left-3 top-2 text-gray-500 font-bold">@</span>
                                 <input
                                     type="text"
-                                    className="w-full px-3 py-2 border border-gray-200 dark:border-gray-600 rounded bg-gray-50 dark:bg-gray-700/50 text-gray-500 dark:text-gray-400 focus:outline-none font-mono"
-                                    value={fullUniqueId}
-                                    readOnly
+                                    className="w-full pl-7 px-3 py-2 border border-gray-200 dark:border-gray-600 rounded dark:bg-whatsapp-inputDark dark:text-white focus:outline-none focus:border-whatsapp-green"
+                                    value={username}
+                                    onChange={(e) => setUsername(e.target.value)}
+                                    placeholder="username"
                                 />
-                                <button
-                                    onClick={() => {
-                                        navigator.clipboard.writeText(fullUniqueId)
-                                        setCopySuccess(true)
-                                        setTimeout(() => setCopySuccess(false), 2000)
-                                    }}
-                                    className="px-3 py-2 bg-gray-100 dark:bg-gray-700 rounded border border-gray-200 dark:border-gray-600 hover:bg-gray-200 dark:hover:bg-gray-600 transition-colors text-sm font-medium text-gray-600 dark:text-gray-300 min-w-[70px]"
-                                    title="Copy Unique ID"
-                                >
-                                    {copySuccess ? 'Copied!' : 'Copy'}
-                                </button>
                             </div>
-                            <p className="text-xs text-gray-500 mt-1">Search format: username#1234</p>
+                            <p className="text-xs text-gray-500 mt-1">People can message you using this username.</p>
                         </div>
                         <div>
                             <label className="block text-sm font-medium text-gray-700 dark:text-whatsapp-light mb-1">Display Name</label>
@@ -175,7 +182,7 @@ export default function SettingsModal({ onClose }) {
                                 onChange={(e) => setAbout(e.target.value)}
                             />
                         </div>
-                        {/* Toggle Theme - Optional addition since user mentioned dark mode earlier, checking if context supports it */}
+                        {/* Toggle Theme */}
                         <div className="flex items-center justify-between pt-2">
                             <span className="text-sm font-medium text-gray-700 dark:text-whatsapp-light">Dark Mode</span>
                             <button

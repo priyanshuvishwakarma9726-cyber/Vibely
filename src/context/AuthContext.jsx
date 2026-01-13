@@ -14,6 +14,9 @@ export const AuthProvider = ({ children }) => {
         supabase.auth.getSession().then(({ data: { session } }) => {
             setUser(session?.user ?? null)
             setLoading(false)
+        }).catch((error) => {
+            console.error('Error checking session:', error)
+            setLoading(false)
         })
 
         // Listen for changes on auth state (logged in, signed out, etc.)
@@ -32,16 +35,7 @@ export const AuthProvider = ({ children }) => {
             setUser(null)
             return supabase.auth.signOut()
         },
-        debugLogin: () => {
-            setUser({
-                id: 'dev-bypass-id',
-                email: 'developer@vibely.app',
-                app_metadata: { provider: 'email' },
-                user_metadata: { username: 'Developer', full_name: 'Vibely Dev' },
-                aud: 'authenticated',
-                created_at: new Date().toISOString()
-            })
-        },
+
         user,
     }
 

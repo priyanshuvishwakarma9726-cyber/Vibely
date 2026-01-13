@@ -39,15 +39,9 @@ export default function Sidebar() {
                         .neq('id', user.id)
                         .limit(10)
 
-                    // Check for Tag (username#1234)
-                    if (searchQuery.includes('#')) {
-                        const [usernamePart, tagPart] = searchQuery.split('#');
-                        if (usernamePart) query = query.ilike('username', `${usernamePart}%`)
-                        if (tagPart) query = query.ilike('discriminator', `${tagPart}%`)
-                    } else {
-                        // Regular username search
-                        query = query.ilike('username', `%${searchQuery}%`)
-                    }
+                    // Check for Tag (username#1234) - REMOVED
+                    // Regular username search
+                    query = query.ilike('username', `%${searchQuery}%`)
 
                     const { data: byUsername, error: err1 } = await query
 
@@ -104,26 +98,48 @@ export default function Sidebar() {
         const fetchStatuses = async () => {
             const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()
 
-            // Fetch all statuses created in last 24h
-            const { data, error } = await supabase
+            // 1. Fetch all statuses created in last 24h (raw)
+            const { data: statusesRaw, error } = await supabase
                 .from('status_updates')
-                .select('*, profiles(username, avatar_url)')
+                .select('*')
                 .gte('created_at', yesterday)
                 .order('created_at', { ascending: true })
 
-            if (data) {
-                // Separate mine and others
-                const mine = data.filter(s => s.user_id === user.id)
-                setMyStatus(mine)
+            if (statusesRaw) {
+                // 2. Fetch profiles for these users
+                const userIds = [...new Set(statusesRaw.map(s => s.user_id))]
+                if (userIds.length > 0) {
+                    const { data: profiles } = await supabase
+                        .from('profiles')
+                        .select('id, username, avatar_url')
+                        .in('id', userIds)
 
-                const others = data.filter(s => s.user_id !== user.id)
-                // Group by user
-                const grouped = {}
-                others.forEach(s => {
-                    if (!grouped[s.user_id]) grouped[s.user_id] = []
-                    grouped[s.user_id].push(s)
-                })
-                setFriendsStatus(grouped)
+                    // Create a map for quick lookup
+                    const profileMap = {}
+                    profiles?.forEach(p => profileMap[p.id] = p)
+
+                    // Attach profiles to statuses
+                    const statusesWithProfile = statusesRaw.map(s => ({
+                        ...s,
+                        profiles: profileMap[s.user_id]
+                    })).filter(s => s.profiles) // Only keep valid ones
+
+                    // Separate mine and others
+                    const mine = statusesWithProfile.filter(s => s.user_id === user.id)
+                    setMyStatus(mine)
+
+                    const others = statusesWithProfile.filter(s => s.user_id !== user.id)
+                    // Group by user
+                    const grouped = {}
+                    others.forEach(s => {
+                        if (!grouped[s.user_id]) grouped[s.user_id] = []
+                        grouped[s.user_id].push(s)
+                    })
+                    setFriendsStatus(grouped)
+                } else {
+                    setMyStatus([])
+                    setFriendsStatus({})
+                }
             }
         }
         fetchStatuses()
@@ -151,19 +167,32 @@ export default function Sidebar() {
 
             const { data: { publicUrl } } = supabase.storage.from('chat-media').getPublicUrl(fileName)
 
-            await supabase.from('status_updates').insert({
+            const { error: insertError } = await supabase.from('status_updates').insert({
                 user_id: user.id,
                 media_url: publicUrl,
                 caption: ''
             })
 
+            if (insertError) throw insertError
+
+            // Refresh statuses
             const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()
-            const { data } = await supabase
+            const { data: rawStatus } = await supabase
                 .from('status_updates')
-                .select('*, profiles(username, avatar_url)')
+                .select('*')
                 .gte('created_at', yesterday)
                 .eq('user_id', user.id)
-            if (data) setMyStatus(data)
+
+            if (rawStatus) {
+                // Attach current user profile (we know it's us)
+                const myProfile = {
+                    id: user.id,
+                    username: user.user_metadata?.username || 'Me',
+                    avatar_url: user.user_metadata?.avatar_url
+                }
+                const withProfile = rawStatus.map(s => ({ ...s, profiles: myProfile }))
+                setMyStatus(withProfile)
+            }
 
         } catch (err) {
             console.error(err)
@@ -180,7 +209,15 @@ export default function Sidebar() {
                     title="Profile"
                     onClick={() => setShowSettings(true)}
                 >
-                    <User className="w-6 h-6 text-gray-500 dark:text-gray-300" />
+                    {user?.user_metadata?.avatar_url ? (
+                        <img
+                            src={user.user_metadata.avatar_url}
+                            alt="Profile"
+                            className="w-full h-full object-cover"
+                        />
+                    ) : (
+                        <User className="w-6 h-6 text-gray-500 dark:text-gray-300" />
+                    )}
                 </div>
 
                 <div className="flex items-center gap-4 text-gray-500 dark:text-gray-400">

@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { MoreVertical, Search, Paperclip, Smile, Mic, Send, Check, CheckCheck, User, Image as ImageIcon, X, Play, Pause, Loader2, Trash2, Ban, Lock, Users, Video as VideoIcon, Phone, Reply, Download, ArrowLeft } from 'lucide-react'
+import EmojiPicker from 'emoji-picker-react'
 import { useAuth } from '../context/AuthContext'
 import { useChat } from '../context/ChatContext'
 import { useCall } from '../context/CallContext'
@@ -25,6 +26,8 @@ export default function ChatWindow() {
     const [replyingTo, setReplyingTo] = useState(null)
     const [contextMenu, setContextMenu] = useState({ visible: false, x: 0, y: 0, messageId: null, senderId: null, content: null })
     const [showGroupInfo, setShowGroupInfo] = useState(false)
+    const [showEmojiPicker, setShowEmojiPicker] = useState(false)
+    const [hasAcceptedRequest, setHasAcceptedRequest] = useState(true) // Default true for groups/friends
 
     // Media
     const fileInputRef = useRef(null)
@@ -75,6 +78,21 @@ export default function ChatWindow() {
             const visible = data.filter(m => !(m.deleted_by || []).includes(user.id))
             setMessages(visible)
             scrollToBottom()
+
+            // Message Request Logic
+            if (!isGroup) {
+                // If I have EVER sent a message, I have accepted.
+                const IHaveSent = visible.some(m => m.sender_id === user.id)
+                // If I haven't sent anything, AND there are messages from them, it's a request.
+                // Unless I am the one initiating (messages.length === 0) -> Open.
+                if (visible.length > 0 && !IHaveSent) {
+                    setHasAcceptedRequest(false)
+                } else {
+                    setHasAcceptedRequest(true)
+                }
+            } else {
+                setHasAcceptedRequest(true)
+            }
 
             if (isGroup) {
                 const userIds = [...new Set(visible.map(m => m.sender_id))]
@@ -186,9 +204,13 @@ export default function ChatWindow() {
         }
 
         const { error } = await supabase.from('messages').insert([payload])
-        if (!error) {
+        if (error) {
+            console.error("Send Error:", error)
+            alert(`Failed to send message: ${error.message}`)
+        } else {
             setReplyingTo(null) // Clear reply
             setNewMessage('')
+            setHasAcceptedRequest(true) // Sending a message auto-accepts
         }
     }
 
@@ -352,118 +374,161 @@ export default function ChatWindow() {
                 </div>
             )}
 
+            {/* Message Request Overlay */}
+            {!hasAcceptedRequest && !isGroup && (
+                <div className="absolute inset-x-0 bottom-0 p-4 bg-white dark:bg-whatsapp-dark border-t border-gray-200 dark:border-gray-700 z-20 flex flex-col items-center justify-center gap-3">
+                    <p className="text-gray-600 dark:text-gray-300 text-sm bg-gray-100 dark:bg-gray-800 px-4 py-2 rounded text-center">
+                        This person is not in your contacts. Accept message request to start chatting.
+                    </p>
+                    <div className="flex gap-4">
+                        <button
+                            onClick={() => setHasAcceptedRequest(true)}
+                            className="bg-whatsapp-green hover:bg-whatsapp-teal text-white px-6 py-2 rounded font-medium"
+                        >
+                            Accept
+                        </button>
+                        <button
+                            onClick={() => selectChat(null)}
+                            className="bg-gray-200 hover:bg-gray-300 text-gray-700 px-6 py-2 rounded font-medium"
+                        >
+                            Ignore
+                        </button>
+                    </div>
+                </div>
+            )
+            }
+
             {/* Input Form (Recycled) */}
             {(isBlocked || amIBlocked) && !isGroup ? (
                 <div className="p-4 bg-gray-100 text-center text-gray-500 text-sm">Cannot message this user</div>
             ) : (
-                <form onSubmit={(e) => { e.preventDefault(); sendMessage(newMessage, 'text') }} className="bg-whatsapp-input dark:bg-whatsapp-inputDark px-4 py-3 flex items-center gap-3 z-10 shrink-0 transition-colors duration-200">
-                    <button type="button" className="text-gray-500 data-[theme=dark]:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300">
-                        <Smile className="w-6 h-6" />
-                    </button>
+                hasAcceptedRequest && (
+                    <form onSubmit={(e) => { e.preventDefault(); sendMessage(newMessage, 'text') }} className="bg-whatsapp-input dark:bg-whatsapp-inputDark px-4 py-3 flex items-center gap-3 z-10 shrink-0 transition-colors duration-200 relative">
+                        {showEmojiPicker && (
+                            <div className="absolute bottom-16 left-4 z-50 shadow-2xl rounded-lg">
+                                <EmojiPicker
+                                    onEmojiClick={(emojiData) => {
+                                        setNewMessage(prev => prev + emojiData.emoji)
+                                        setShowEmojiPicker(false)
+                                    }}
+                                    theme="auto"
+                                />
+                                {/* Click outside handler could be added here or simple toggle */}
+                            </div>
+                        )}
 
-                    <input
-                        type="file"
-                        accept="image/*"
-                        className="hidden"
-                        ref={fileInputRef}
-                        onChange={(e) => {
-                            if (e.target.files && e.target.files[0]) {
-                                const file = e.target.files[0]
-                                const type = 'image'
-                                setIsUploading(true)
-                                const upload = async () => {
-                                    try {
-                                        const fileExt = file.name.split('.').pop()
-                                        const fileName = `uploads/${Date.now()}.${fileExt}`
-                                        const { error: uploadError } = await supabase.storage.from('chat-media').upload(fileName, file)
-                                        if (uploadError) throw uploadError
-                                        const { data: { publicUrl } } = supabase.storage.from('chat-media').getPublicUrl(fileName)
-                                        await sendMessage(publicUrl, type)
-                                    } catch (err) { console.error(err); alert("Failed") }
-                                    finally { setIsUploading(false); if (fileInputRef.current) fileInputRef.current.value = '' }
-                                }
-                                upload()
-                            }
-                        }}
-                    />
-                    <button
-                        type="button"
-                        className="text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300 disabled:opacity-50"
-                        onClick={() => fileInputRef.current?.click()}
-                        disabled={isUploading || isRecording}
-                    >
-                        <Paperclip className="w-6 h-6" />
-                    </button>
-
-                    <div className="flex-1 bg-white dark:bg-whatsapp-darker rounded-lg flex items-center px-4 py-2 transition-colors duration-200">
-                        <input
-                            type="text"
-                            placeholder={isRecording ? "Recording audio..." : "Type a message"}
-                            className="w-full border-none outline-none text-sm text-gray-700 dark:text-white placeholder-gray-500 dark:placeholder-gray-400 bg-transparent"
-                            value={newMessage}
-                            onChange={(e) => setNewMessage(e.target.value)}
-                            disabled={isRecording || isUploading}
-                        />
-                    </div>
-
-                    {newMessage.trim() ? (
-                        <button type="submit" className="text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300">
-                            <Send className="w-6 h-6" />
+                        <button
+                            type="button"
+                            onClick={() => setShowEmojiPicker(!showEmojiPicker)}
+                            className={`text-gray-500 data-[theme=dark]:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300 ${showEmojiPicker ? 'text-whatsapp-green' : ''}`}
+                        >
+                            <Smile className="w-6 h-6" />
                         </button>
-                    ) : (
-                        isRecording ? (
-                            <button
-                                type="button"
-                                onClick={() => {
-                                    if (mediaRecorderRef.current && isRecording) {
-                                        mediaRecorderRef.current.stop()
-                                        setIsRecording(false)
+
+                        <input
+                            type="file"
+                            accept="image/*"
+                            className="hidden"
+                            ref={fileInputRef}
+                            onChange={(e) => {
+                                if (e.target.files && e.target.files[0]) {
+                                    const file = e.target.files[0]
+                                    const type = 'image'
+                                    setIsUploading(true)
+                                    const upload = async () => {
+                                        try {
+                                            const fileExt = file.name.split('.').pop()
+                                            const fileName = `uploads/${Date.now()}.${fileExt}`
+                                            const { error: uploadError } = await supabase.storage.from('chat-media').upload(fileName, file)
+                                            if (uploadError) throw uploadError
+                                            const { data: { publicUrl } } = supabase.storage.from('chat-media').getPublicUrl(fileName)
+                                            await sendMessage(publicUrl, type)
+                                        } catch (err) { console.error(err); alert("Failed") }
+                                        finally { setIsUploading(false); if (fileInputRef.current) fileInputRef.current.value = '' }
                                     }
-                                }}
-                                className="text-red-500 hover:text-red-600 animate-pulse"
-                            >
-                                <div className="w-10 h-10 bg-red-100 rounded-full flex items-center justify-center">
-                                    <X className="w-5 h-5" />
-                                </div>
+                                    upload()
+                                }
+                            }}
+                        />
+                        <button
+                            type="button"
+                            className="text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300 disabled:opacity-50"
+                            onClick={() => fileInputRef.current?.click()}
+                            disabled={isUploading || isRecording}
+                        >
+                            <Paperclip className="w-6 h-6" />
+                        </button>
+
+                        <div className="flex-1 bg-white dark:bg-whatsapp-darker rounded-lg flex items-center px-4 py-2 transition-colors duration-200">
+                            <input
+                                type="text"
+                                placeholder={isRecording ? "Recording audio..." : "Type a message"}
+                                className="w-full border-none outline-none text-sm text-gray-700 dark:text-white placeholder-gray-500 dark:placeholder-gray-400 bg-transparent"
+                                value={newMessage}
+                                onChange={(e) => setNewMessage(e.target.value)}
+                                disabled={isRecording || isUploading}
+                            />
+                        </div>
+
+                        {newMessage.trim() ? (
+                            <button type="submit" className="text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300">
+                                <Send className="w-6 h-6" />
                             </button>
                         ) : (
-                            <button
-                                type="button"
-                                onClick={async () => {
-                                    try {
-                                        const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
-                                        const mediaRecorder = new MediaRecorder(stream)
-                                        mediaRecorderRef.current = mediaRecorder
-                                        const audioChunks = []
-                                        mediaRecorder.ondataavailable = (event) => { if (event.data.size > 0) audioChunks.push(event.data) }
-                                        mediaRecorder.onstop = async () => {
-                                            const audioBlob = new Blob(audioChunks, { type: 'audio/webm' })
-                                            const audioFile = new File([audioBlob], "voice_note.webm", { type: "audio/webm" })
-
-                                            setIsUploading(true)
-                                            try {
-                                                const fileName = `uploads/${Date.now()}.webm`
-                                                const { error: uploadError } = await supabase.storage.from('chat-media').upload(fileName, audioFile)
-                                                if (uploadError) throw uploadError
-                                                const { data: { publicUrl } } = supabase.storage.from('chat-media').getPublicUrl(fileName)
-                                                await sendMessage(publicUrl, 'audio')
-                                            } catch (err) { console.error(err) }
-                                            finally { setIsUploading(false) }
-
-                                            stream.getTracks().forEach(track => track.stop())
+                            isRecording ? (
+                                <button
+                                    type="button"
+                                    onClick={() => {
+                                        if (mediaRecorderRef.current && isRecording) {
+                                            mediaRecorderRef.current.stop()
+                                            setIsRecording(false)
                                         }
-                                        mediaRecorder.start()
-                                        setIsRecording(true)
-                                    } catch (err) { console.error(err); alert("Mic Error") }
-                                }}
-                                className="text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300 disabled:opacity-50"
-                                disabled={isUploading}
-                            >
-                                {isUploading ? <Loader2 className="w-6 h-6 animate-spin" /> : <Mic className="w-6 h-6" />}
-                            </button>
-                        )
-                    )}
-                </form>
+                                    }}
+                                    className="text-red-500 hover:text-red-600 animate-pulse"
+                                >
+                                    <div className="w-10 h-10 bg-red-100 rounded-full flex items-center justify-center">
+                                        <X className="w-5 h-5" />
+                                    </div>
+                                </button>
+                            ) : (
+                                <button
+                                    type="button"
+                                    onClick={async () => {
+                                        try {
+                                            const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+                                            const mediaRecorder = new MediaRecorder(stream)
+                                            mediaRecorderRef.current = mediaRecorder
+                                            const audioChunks = []
+                                            mediaRecorder.ondataavailable = (event) => { if (event.data.size > 0) audioChunks.push(event.data) }
+                                            mediaRecorder.onstop = async () => {
+                                                const audioBlob = new Blob(audioChunks, { type: 'audio/webm' })
+                                                const audioFile = new File([audioBlob], "voice_note.webm", { type: "audio/webm" })
+
+                                                setIsUploading(true)
+                                                try {
+                                                    const fileName = `uploads/${Date.now()}.webm`
+                                                    const { error: uploadError } = await supabase.storage.from('chat-media').upload(fileName, audioFile)
+                                                    if (uploadError) throw uploadError
+                                                    const { data: { publicUrl } } = supabase.storage.from('chat-media').getPublicUrl(fileName)
+                                                    await sendMessage(publicUrl, 'audio')
+                                                } catch (err) { console.error(err) }
+                                                finally { setIsUploading(false) }
+
+                                                stream.getTracks().forEach(track => track.stop())
+                                            }
+                                            mediaRecorder.start()
+                                            setIsRecording(true)
+                                        } catch (err) { console.error(err); alert("Mic Error") }
+                                    }}
+                                    className="text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300 disabled:opacity-50"
+                                    disabled={isUploading}
+                                >
+                                    {isUploading ? <Loader2 className="w-6 h-6 animate-spin" /> : <Mic className="w-6 h-6" />}
+                                </button>
+                            )
+                        )}
+                    </form>
+                )
             )}
         </div>
     )

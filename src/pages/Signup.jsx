@@ -37,7 +37,6 @@ export default function Signup() {
 
             if (data?.user) {
                 // 2. Create profile
-                const discriminator = Math.floor(1000 + Math.random() * 9000).toString(); // Generate 4 digit tag
                 const { error: profileError } = await supabase
                     .from('profiles')
                     .insert([
@@ -46,7 +45,6 @@ export default function Signup() {
                             username,
                             full_name: fullName,
                             about: 'Hey there! I am using Vibely.',
-                            discriminator: discriminator, // Store the tag
                             status: 'online',
                         }
                     ])

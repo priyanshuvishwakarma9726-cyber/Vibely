@@ -72,16 +72,7 @@ export default function Login() {
                         {loading ? 'Logging in...' : 'Log In'}
                     </button>
 
-                    <button
-                        type="button"
-                        onClick={() => {
-                            debugLogin()
-                            navigate('/')
-                        }}
-                        className="w-full bg-gray-200 hover:bg-gray-300 text-gray-700 font-medium py-2.5 rounded transition-colors mt-3"
-                    >
-                        Bypass Login (UI Test Mode)
-                    </button>
+
                 </form>
 
                 <div className="mt-6 text-center text-sm text-gray-600">

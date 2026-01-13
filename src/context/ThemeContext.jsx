@@ -9,16 +9,25 @@ export const ThemeProvider = ({ children }) => {
     const [darkMode, setDarkMode] = useState(false)
 
     useEffect(() => {
-        // FORCE LIGHT MODE: User requested removal of dark theme
-        setDarkMode(false)
-        document.documentElement.classList.remove('dark')
-        localStorage.setItem('darkMode', 'false')
+        // Load preference
+        const savedMode = localStorage.getItem('darkMode') === 'true'
+        setDarkMode(savedMode)
+        if (savedMode) {
+            document.documentElement.classList.add('dark')
+        }
     }, [])
 
     const toggleDarkMode = () => {
-        // Disabled
-        setDarkMode(false)
-        document.documentElement.classList.remove('dark')
+        setDarkMode(prev => {
+            const newMode = !prev
+            localStorage.setItem('darkMode', newMode.toString())
+            if (newMode) {
+                document.documentElement.classList.add('dark')
+            } else {
+                document.documentElement.classList.remove('dark')
+            }
+            return newMode
+        })
     }
 
     const value = {
