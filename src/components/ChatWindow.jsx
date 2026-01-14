@@ -6,12 +6,14 @@ import { useChat } from '../context/ChatContext'
 import { useCall } from '../context/CallContext'
 import { supabase } from '../lib/supabase'
 import GroupInfoModal from './GroupInfoModal'
+import ContactInfoModal from './ContactInfoModal'
 
 export default function ChatWindow() {
     const { user } = useAuth()
-    const { selectedChat, selectChat } = useChat()
+    const { selectedChat, selectChat, onlineUsers } = useChat()
     const { startCall } = useCall()
     const isGroup = selectedChat?.type === 'group'
+    const isOnline = !isGroup && onlineUsers.has(selectedChat.id)
 
     const [messages, setMessages] = useState([])
     const [newMessage, setNewMessage] = useState('')
@@ -26,8 +28,12 @@ export default function ChatWindow() {
     const [replyingTo, setReplyingTo] = useState(null)
     const [contextMenu, setContextMenu] = useState({ visible: false, x: 0, y: 0, messageId: null, senderId: null, content: null })
     const [showGroupInfo, setShowGroupInfo] = useState(false)
+    const [showContactInfo, setShowContactInfo] = useState(false)
     const [showEmojiPicker, setShowEmojiPicker] = useState(false)
+    const [expandedMessageId, setExpandedMessageId] = useState(null)
     const [hasAcceptedRequest, setHasAcceptedRequest] = useState(true) // Default true for groups/friends
+    const [isTyping, setIsTyping] = useState(false)
+    const typingTimeoutRef = useRef(null)
 
     // Media
     const fileInputRef = useRef(null)
@@ -57,64 +63,93 @@ export default function ChatWindow() {
 
     // Load Messages with Reply content logic
     const fetchMessages = async () => {
-        if (!selectedChat) return
+        if (!selectedChat || !user) return
         setMessages([])
         setLoading(true)
 
-        // We select *, and ideally we could join for reply. 
-        // For simplicity, we fetch all messages, then we can resolve reply content from memory if loaded, or we fetch individually.
-        // Actually, fetching everything is fine. We will map reply_to ID to content on render.
-        let query = supabase.from('messages').select('*').order('created_at', { ascending: true })
+        try {
+            let query = supabase.from('messages').select('*').order('created_at', { ascending: true })
 
-        if (isGroup) {
-            query = query.eq('group_id', selectedChat.id)
-        } else {
-            query = query.is('group_id', null)
-                .or(`and(sender_id.eq.${user.id},receiver_id.eq.${selectedChat.id}),and(sender_id.eq.${selectedChat.id},receiver_id.eq.${user.id})`)
-        }
+            if (isGroup) {
+                query = query.eq('group_id', selectedChat.id)
+            } else {
+                query = query.is('group_id', null)
+                    .or(`and(sender_id.eq.${user.id},receiver_id.eq.${selectedChat.id}),and(sender_id.eq.${selectedChat.id},receiver_id.eq.${user.id})`)
+            }
 
-        const { data } = await query
-        if (data) {
-            const visible = data.filter(m => !(m.deleted_by || []).includes(user.id))
-            setMessages(visible)
-            scrollToBottom()
+            const { data, error } = await query
+            if (error) {
+                console.error("Error fetching messages:", error)
+            }
+            if (data) {
+                const visible = data.filter(m => !(m.deleted_by || []).includes(user.id))
+                setMessages(visible)
+                scrollToBottom()
 
-            // Message Request Logic
-            if (!isGroup) {
-                // If I have EVER sent a message, I have accepted.
-                const IHaveSent = visible.some(m => m.sender_id === user.id)
-                // If I haven't sent anything, AND there are messages from them, it's a request.
-                // Unless I am the one initiating (messages.length === 0) -> Open.
-                if (visible.length > 0 && !IHaveSent) {
-                    setHasAcceptedRequest(false)
+                // Message Request Logic
+                if (!isGroup) {
+                    const IHaveSent = visible.some(m => m.sender_id === user.id)
+                    // If local override allows, or if conversation exists
+                    if (visible.length > 0 && !IHaveSent) {
+                        setHasAcceptedRequest(false)
+                    } else {
+                        setHasAcceptedRequest(true)
+                    }
                 } else {
                     setHasAcceptedRequest(true)
                 }
-            } else {
-                setHasAcceptedRequest(true)
-            }
 
-            if (isGroup) {
-                const userIds = [...new Set(visible.map(m => m.sender_id))]
-                if (userIds.length > 0) {
-                    const { data: profiles } = await supabase.from('profiles').select('id, username').in('id', userIds)
-                    if (profiles) {
-                        const map = {}
-                        profiles.forEach(p => map[p.id] = p)
-                        setGroupMembers(prev => ({ ...prev, ...map }))
+                if (isGroup) {
+                    const userIds = [...new Set(visible.map(m => m.sender_id))]
+                    if (userIds.length > 0) {
+                        const { data: profiles } = await supabase.from('profiles').select('id, username').in('id', userIds)
+                        if (profiles) {
+                            const map = {}
+                            profiles.forEach(p => map[p.id] = p)
+                            setGroupMembers(prev => ({ ...prev, ...map }))
+                        }
                     }
                 }
+
+                // Mark unread messages as read (if I am receiver)
+                const unreadIds = visible.filter(m => !m.is_read && m.sender_id !== user.id).map(m => m.id)
+                if (unreadIds.length > 0) {
+                    await supabase.from('messages').update({ is_read: true }).in('id', unreadIds)
+                }
             }
+        } catch (err) {
+            console.error("Exception fetching messages:", err)
+        } finally {
+            setLoading(false)
         }
-        setLoading(false)
     }
 
     useEffect(() => {
         fetchMessages()
 
-        const filter = isGroup ? `group_id=eq.${selectedChat.id}` : null
         const channel = supabase.channel(`chat:${selectedChat.id}`)
-            .on('postgres_changes', { event: '*', schema: 'public', table: 'messages', filter }, (payload) => {
+
+        // Typing Indicator Listener
+        channel.on('broadcast', { event: 'typing' }, ({ payload }) => {
+            if (payload.sender_id !== user.id) {
+                setIsTyping(true)
+                if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current)
+                typingTimeoutRef.current = setTimeout(() => setIsTyping(false), 3000)
+            }
+        })
+
+        const subscriptionConfig = {
+            event: '*',
+            schema: 'public',
+            table: 'messages'
+        }
+
+        if (isGroup) {
+            subscriptionConfig.filter = `group_id=eq.${selectedChat.id}`
+        }
+
+        channel
+            .on('postgres_changes', subscriptionConfig, (payload) => {
                 // Simplistic filter
                 let isValid = false
                 if (isGroup) isValid = payload.new.group_id === selectedChat.id
@@ -130,6 +165,18 @@ export default function ChatWindow() {
                             return [...prev, payload.new]
                         })
                         scrollToBottom()
+
+                        // If I received it, mark as read immediately
+                        if (payload.new.sender_id !== user.id) {
+                            supabase.from('messages').update({ is_read: true }).eq('id', payload.new.id).then()
+                        }
+
+
+                        // If I received it, mark as read immediately
+                        if (payload.new.sender_id !== user.id) {
+                            supabase.from('messages').update({ is_read: true }).eq('id', payload.new.id).then()
+                        }
+
                     } else if (payload.eventType === 'UPDATE') {
                         setMessages(prev => prev.map(m => m.id === payload.new.id ? payload.new : m))
                     }
@@ -203,11 +250,21 @@ export default function ChatWindow() {
             payload.receiver_id = selectedChat.id
         }
 
-        const { error } = await supabase.from('messages').insert([payload])
+        const { data, error } = await supabase.from('messages').insert([payload]).select().single()
+
         if (error) {
             console.error("Send Error:", error)
             alert(`Failed to send message: ${error.message}`)
         } else {
+            // Optimistic Update (if Realtime is slow) or just confirmation
+            if (data) {
+                setMessages(prev => {
+                    if (prev.find(m => m.id === data.id)) return prev
+                    return [...prev, data]
+                })
+                scrollToBottom()
+            }
+
             setReplyingTo(null) // Clear reply
             setNewMessage('')
             setHasAcceptedRequest(true) // Sending a message auto-accepts
@@ -219,6 +276,24 @@ export default function ChatWindow() {
         const m = messages.find(msg => msg.id === replyId)
         if (!m) return "Message not found"
         return m.message_type === 'text' ? m.content : `[${m.message_type}]`
+    }
+
+    const handleTyping = async () => {
+        const channel = supabase.channel(`chat:${selectedChat.id}`)
+        await channel.send({
+            type: 'broadcast',
+            event: 'typing',
+            payload: { sender_id: user.id }
+        })
+    }
+
+    const formatLastSeen = (dateString) => {
+        if (!dateString) return ''
+        const date = new Date(dateString)
+        const now = new Date()
+        const isToday = date.toDateString() === now.toDateString()
+        const time = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+        return isToday ? `Last seen today at ${time}` : `Last seen ${date.toLocaleDateString()} at ${time}`
     }
 
     // Responsive Mobile Back
@@ -244,8 +319,17 @@ export default function ChatWindow() {
                         )}
                     </div>
                     <div>
-                        <h2 className="text-gray-900 dark:text-white font-medium leading-none">{isGroup ? selectedChat.name : selectedChat.username}</h2>
-                        <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">{isGroup ? 'Group Info' : 'Contact Info'}</p>
+                        <h2 className="text-gray-900 dark:text-white font-medium leading-none">{isGroup ? selectedChat.name : (selectedChat.full_name || selectedChat.username)}</h2>
+                        <p className={`text-xs mt-0.5 ${isOnline || isTyping ? 'text-green-500 font-medium' : 'text-gray-500 dark:text-gray-400'}`}>
+                            {isGroup
+                                ? 'Group Info'
+                                : isTyping
+                                    ? 'Typing...'
+                                    : isOnline
+                                        ? 'Online'
+                                        : formatLastSeen(selectedChat.last_seen) || 'Contact Info'
+                            }
+                        </p>
                     </div>
                 </div>
 
@@ -263,11 +347,14 @@ export default function ChatWindow() {
                                 {isGroup ? (
                                     <button className="w-full text-left px-4 py-2 hover:bg-gray-50 dark:hover:bg-gray-800 text-gray-700 dark:text-gray-300 text-sm" onClick={() => { setShowMenu(false); setShowGroupInfo(true); }}>Group info</button>
                                 ) : (
-                                    <button className="w-full text-left px-4 py-2 hover:bg-gray-50 dark:hover:bg-gray-800 text-red-600 text-sm" onClick={async () => {
-                                        if (isBlocked) await supabase.from('blocked_users').delete().match({ blocker_id: user.id, blocked_id: selectedChat.id })
-                                        else await supabase.from('blocked_users').insert([{ blocker_id: user.id, blocked_id: selectedChat.id }])
-                                        setIsBlocked(!isBlocked); setShowMenu(false);
-                                    }}>{isBlocked ? 'Unblock' : 'Block'}</button>
+                                    <>
+                                        <button className="w-full text-left px-4 py-2 hover:bg-gray-50 dark:hover:bg-gray-800 text-gray-700 dark:text-gray-300 text-sm" onClick={() => { setShowMenu(false); setShowContactInfo(true); }}>Contact info</button>
+                                        <button className="w-full text-left px-4 py-2 hover:bg-gray-50 dark:hover:bg-gray-800 text-red-600 text-sm" onClick={async () => {
+                                            if (isBlocked) await supabase.from('blocked_users').delete().match({ blocker_id: user.id, blocked_id: selectedChat.id })
+                                            else await supabase.from('blocked_users').insert([{ blocker_id: user.id, blocked_id: selectedChat.id }])
+                                            setIsBlocked(!isBlocked); setShowMenu(false);
+                                        }}>{isBlocked ? 'Unblock' : 'Block'}</button>
+                                    </>
                                 )}
                                 <button className="w-full text-left px-4 py-2 hover:bg-gray-50 dark:hover:bg-gray-800 text-gray-700 dark:text-gray-300 text-sm flex items-center gap-2" onClick={exportChat}>
                                     <Download className="w-4 h-4" /> Export Chat
@@ -280,6 +367,7 @@ export default function ChatWindow() {
 
             {/* Body */}
             {showGroupInfo && <GroupInfoModal onClose={() => setShowGroupInfo(false)} />}
+            {showContactInfo && <ContactInfoModal onClose={() => setShowContactInfo(false)} profile={selectedChat} />}
 
             <div className="flex-1 overflow-y-auto p-4 z-10 space-y-2 custom-scrollbar">
                 {messages.map(msg => {
@@ -296,13 +384,17 @@ export default function ChatWindow() {
                     return (
                         <div key={msg.id} className={`flex ${isMe ? 'justify-end' : 'justify-start'} group max-w-full`}>
                             <div
+                                onClick={(e) => {
+                                    e.stopPropagation()
+                                    setExpandedMessageId(expandedMessageId === msg.id ? null : msg.id)
+                                }}
                                 onContextMenu={(e) => {
                                     e.preventDefault()
                                     if (isDeleted) return
                                     setContextMenu({ visible: true, x: e.pageX, y: e.pageY, messageId: msg.id, senderId: msg.sender_id, content: msg.message_type === 'text' ? msg.content : 'media' })
                                 }}
                                 className={`
-                                    relative max-w-[85%] md:max-w-[65%] px-2 py-1.5 text-sm rounded-lg shadow-sm 
+                                    relative max-w-[85%] md:max-w-[65%] px-2 py-1.5 text-sm rounded-lg shadow-sm cursor-pointer select-none
                                     ${isMe ? 'bg-whatsapp-messageOut dark:bg-whatsapp-messageOutDark rounded-tr-none' : 'bg-whatsapp-messageIn dark:bg-whatsapp-messageInDark rounded-tl-none'}
                                 `}
                             >
@@ -331,7 +423,20 @@ export default function ChatWindow() {
                                     </div>
                                 )}
 
-                                <div className="absolute bottom-1 right-2 text-[10px] text-gray-500">{new Date(msg.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</div>
+                                <div className="absolute bottom-1 right-2 flex items-center gap-1">
+                                    {/* Always show status if it's me */}
+                                    {isMe && (
+                                        <span className={`text-[10px] font-medium ${msg.is_read ? 'text-blue-500' : 'text-gray-400'}`}>
+                                            {msg.is_read ? 'Seen' : 'Sent'}
+                                        </span>
+                                    )}
+                                    {/* Show timestamp only when expanded */}
+                                    {expandedMessageId === msg.id && (
+                                        <span className="text-[10px] text-gray-500 animate-in fade-in duration-200">
+                                            {new Date(msg.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                                        </span>
+                                    )}
+                                </div>
                             </div>
                         </div>
                     )
@@ -465,7 +570,10 @@ export default function ChatWindow() {
                                 placeholder={isRecording ? "Recording audio..." : "Type a message"}
                                 className="w-full border-none outline-none text-sm text-gray-700 dark:text-white placeholder-gray-500 dark:placeholder-gray-400 bg-transparent"
                                 value={newMessage}
-                                onChange={(e) => setNewMessage(e.target.value)}
+                                onChange={(e) => {
+                                    setNewMessage(e.target.value)
+                                    handleTyping()
+                                }}
                                 disabled={isRecording || isUploading}
                             />
                         </div>
